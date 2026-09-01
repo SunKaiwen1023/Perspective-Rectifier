@@ -40,7 +40,7 @@ angles. On the bundled examples it lands within 0.1–1.3% of the true value.
 You need Python 3.9 or newer. From a fresh clone:
 
 ```bash
-git clone https://github.com/SunKaiwen1023/Perspective-Rectifier.git
+git clone <this-repository-url>
 cd perspective-rectifier
 
 python -m venv .venv
@@ -65,7 +65,7 @@ python app.py
 **Verifying the install:**
 
 ```bash
-pytest -q          # 39 tests, ~7 seconds
+pytest -q          # 45 tests, ~14 seconds
 ```
 
 That is the whole setup. There are no model weights to download, no API keys,
@@ -101,6 +101,10 @@ create a temporary public link.
 6. **Choose what to rectify** with the radio buttons, pick a **crop** mode, and
    use the strength slider to blend between the original and the fully
    corrected version.
+7. **Press "Render full resolution"** to save the result as a PNG or JPEG. The
+   preview panel is deliberately small — see below — so this step re-warps your
+   original upload at its native resolution rather than enlarging what is on
+   screen.
 
 The panel on the right, *What the system computed*, reports every internal
 quantity: how many segments were found, how many voted for each vanishing
@@ -220,6 +224,40 @@ The validity mask is built by warping a solid white image with the same
 homography, not by testing the output for black pixels — otherwise a genuinely
 dark doorway in the photograph would be mistaken for empty canvas.
 
+### Preview versus export (`Session.export_full_resolution`)
+
+Everything above runs on a copy of the photo downscaled to at most 1000 px, and
+warps into a canvas of at most 900 px. That is the right trade for something
+that re-estimates and re-renders on every click — a full recompute lands in
+about 0.2 s — and completely the wrong one for a file you intend to keep. A
+4000-pixel photograph would otherwise come back at roughly 700 px and visibly
+soft.
+
+So saving is a separate, deliberate step, and it re-warps the **original**
+upload rather than enlarging the preview. Nothing is re-estimated. If `S` is
+the downscaling that produced the analysis image and `H` the homography found
+in that frame, a point of the original reaches the preview canvas by `H · S`,
+so scaling that canvas up by `k` gives
+
+```
+H_export = diag(k, k, 1) · H · S
+```
+
+which warps the untouched original straight into a canvas `k` times the
+preview's size; `k = 1/scale` restores the original pixel density. The crop
+rectangle is scaled by the same factor instead of being searched again, so the
+saved file is framed exactly like the preview you approved. Interpolation is
+bicubic here rather than bilinear — the cost is paid once, not on every click.
+
+On a 4000 × 2666 pixel input this turns a 725 × 486 preview into a 2896 × 1940
+export, about **3.5× the high-frequency detail** of the same preview upscaled
+to that size (variance of the Laplacian, 20.6 versus 5.8).
+
+One related annoyance worth recording, since it is invisible until you try to
+use the output: Gradio's built-in image download button defaults to **WebP**,
+which several common image editors still refuse to open. Both image panels now
+pass `format="png"` explicitly, and the export offers PNG or JPEG.
+
 ### Stage 4 — Learn which edges are structural (`src/features.py`, `src/suggest.py`)
 
 Geometry alone has a blind spot. A branch can point at a vanishing point by
@@ -313,7 +351,7 @@ perspective-rectifier/
 │   ├── ground_truth.json     True vanishing points and focal lengths
 │   └── 0*.jpg                Four bundled scenes
 ├── tests/
-│   └── test_pipeline.py      39 tests, checked against ground truth
+│   └── test_pipeline.py      45 tests, checked against ground truth
 └── docs/                     Screenshots used in this README
 ```
 
@@ -355,8 +393,12 @@ nothing about widgets. That is why the whole algorithm can be tested headlessly.
   unticking it throws the good lines out too, and clicking the bad lines
   individually does better. The interface says so, but it is a real limitation
   of grouping by vanishing point rather than by what the edge actually is.
-- **Everything happens at up to 1000 px.** Large uploads are downscaled for
-  responsiveness, so the rectified output is not full resolution.
+- **Analysis happens at up to 1000 px**, even though the export is full
+  resolution. Detection and vanishing-point estimation see the downscaled copy,
+  so very fine or very short edges in a large photograph are never candidates
+  in the first place. Raising the analysis resolution would find more of them
+  at the cost of a slower click loop; the export path only fixes output
+  sharpness, not what the estimator had to work with.
 
 **What I would do next**, in order: use a segmentation model (Segment
 Anything, as suggested in feedback on my proposal) to mask vegetation and sky
@@ -408,7 +450,14 @@ was tedious when an entire family was wrong, so I asked whether the families
 the system had already grouped and colour-coded could be toggled directly —
 that became the family checkboxes.
 
-Testing that second feature immediately exposed its own limitation. Dismissing
+A third round came from the same place. Once I started saving results I found
+that the downloads arrived as WebP files my image editor would not open, and
+that the saved image was noticeably soft — the preview is rendered small so it
+can redraw on every click, and saving was handing back that small render. Both
+are fixed: the download format is now explicit, and saving re-warps the
+original upload at full resolution instead of enlarging the preview.
+
+Testing the family control immediately exposed its own limitation. Dismissing
 the vertical family in the foliage example makes the estimate *worse*, because
 that family mixes tree trunks with genuine building edges and the toggle throws
 out both. I decided to keep the feature, document the limitation in section 7,

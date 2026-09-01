@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import tempfile
 
 # Gradio phones home for usage analytics on startup. Disabling it before the
 # import keeps a fresh clone from hanging on a network call when the machine is
@@ -88,6 +90,9 @@ HOW_TO = """
    Tick it again to bring the same lines back.
 5. **Choose what to rectify**, how to crop the result, and drag the strength
    slider to taste.
+6. **Press "Render full resolution"** to save the result. The preview redraws
+   on every click, so it is deliberately small; this step re-warps your
+   original upload at its native resolution and gives you a PNG or JPEG.
 
 The panel under the result reports every internal quantity, including how far
 each family's lines actually miss its vanishing point.
@@ -199,6 +204,30 @@ def on_reset(session, angle_tol, *view):
     status = session.reset()
     session.recompute(threshold_deg=float(angle_tol))
     return (session, *_render(session, *view, status=status))
+
+
+def on_export(session, mode, strength, crop_mode, file_format):
+    """Render the full-resolution result and hand back a file to download.
+
+    The preview panels are small on purpose - they re-render on every click -
+    so this is a separate, deliberate step rather than something that happens
+    automatically. It re-warps the original upload rather than upscaling what
+    is on screen.
+    """
+    if session is None:
+        return None, "Upload an image first."
+
+    extension = "jpg" if file_format.lower().startswith("jpeg") else "png"
+    slug = re.sub(r"[^a-z0-9]+", "-", mode.lower()).strip("-")[:40]
+    # A fresh directory per export: Gradio serves files by path and would
+    # happily hand back a cached copy if we kept overwriting one name.
+    path = os.path.join(tempfile.mkdtemp(prefix="rectified-"), f"rectified-{slug}.{extension}")
+
+    saved, note = session.save_export(path, mode, float(strength), crop_mode)
+    if saved is None:
+        return None, note
+    size_mb = os.path.getsize(saved) / 1e6
+    return saved, f"{note} Saved as {extension.upper()} ({size_mb:.1f} MB)."
 
 
 def _on_release(component):
@@ -318,6 +347,7 @@ def build_interface() -> gr.Blocks:
                     type="numpy",
                     interactive=False,
                     height=460,
+                    format="png",
                 )
                 families = gr.CheckboxGroup(
                     choices=[], value=[],
@@ -334,7 +364,31 @@ def build_interface() -> gr.Blocks:
 
             # ---------------- result ---------------------------------------
             with gr.Column(scale=4, min_width=320):
-                result = gr.Image(label="Rectified result", type="numpy", height=460)
+                # format="png" matters: Gradio's own download button defaults to
+                # webp, which many image editors will not open.
+                result = gr.Image(
+                    label="Rectified result (preview)",
+                    type="numpy",
+                    height=460,
+                    format="png",
+                )
+                with gr.Accordion("Save the result", open=True):
+                    gr.Markdown(
+                        "The preview above is rendered small so it can redraw on "
+                        "every click. This re-warps your **original upload** at "
+                        "full resolution instead of enlarging the preview."
+                    )
+                    with gr.Row():
+                        file_format = gr.Radio(
+                            ["PNG (lossless)", "JPEG (smaller)"],
+                            value="PNG (lossless)",
+                            label="File format",
+                            scale=2,
+                        )
+                        export_button = gr.Button(
+                            "Render full resolution", variant="primary", scale=1
+                        )
+                    download = gr.File(label="Download", interactive=False)
                 with gr.Accordion("What the system computed", open=True):
                     diagnostics = gr.Markdown()
 
@@ -367,6 +421,14 @@ def build_interface() -> gr.Blocks:
             on_auto_clean, [session, suspicion, angle_tol, *view_controls], outputs
         )
         reset_button.click(on_reset, [session, angle_tol, *view_controls], outputs)
+
+        # The export has its own, smaller output set: it produces a file and a
+        # status line, and changes no session state.
+        export_button.click(
+            on_export,
+            [session, mode, strength, crop_mode, file_format],
+            [download, status],
+        )
 
     return demo
 

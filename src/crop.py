@@ -183,6 +183,20 @@ def largest_inscribed_rect(mask: np.ndarray, aspect: float | None = None):
     return None
 
 
+def crop_rect(mask: np.ndarray, mode: str, source_shape):
+    """The rectangle `mode` asks for, as `(y, x, height, width)`, or None.
+
+    Separated from `apply_crop` because the full-resolution export needs the
+    *rectangle* rather than a cropped array: it scales the preview's rectangle
+    up instead of searching again, which guarantees the exported file is framed
+    exactly like the preview the user was looking at.
+    """
+    if mode == CROP_OFF or mask is None:
+        return None
+    aspect = float(source_shape[1]) / float(source_shape[0]) if mode == CROP_ORIGINAL else None
+    return largest_inscribed_rect(mask, aspect=aspect)
+
+
 def apply_crop(image: np.ndarray, mask: np.ndarray, mode: str, source_shape):
     """Crop `image` according to `mode`. Returns `(cropped, note)`.
 
@@ -195,11 +209,7 @@ def apply_crop(image: np.ndarray, mask: np.ndarray, mode: str, source_shape):
     if mode == CROP_OFF or image is None or mask is None:
         return image, ""
 
-    aspect = None
-    if mode == CROP_ORIGINAL:
-        aspect = float(source_shape[1]) / float(source_shape[0])
-
-    rect = largest_inscribed_rect(mask, aspect=aspect)
+    rect = crop_rect(mask, mode, source_shape)
     if rect is None:
         return image, "No usable crop found; showing the full warp."
 
@@ -207,3 +217,23 @@ def apply_crop(image: np.ndarray, mask: np.ndarray, mode: str, source_shape):
     cropped = image[y : y + h, x : x + w]
     kept = 100.0 * (h * w) / float(image.shape[0] * image.shape[1])
     return cropped, f"Cropped to {w}x{h} px ({kept:.0f}% of the warped canvas)."
+
+
+def scale_rect(rect, factor: float, bounds, inset: int = 2):
+    """Scale a crop rectangle to a larger canvas, staying safely inside it.
+
+    Used by the full-resolution export: the rectangle was found on the small
+    preview mask, and multiplying it up can land a pixel or two outside the
+    valid region once rounding is accounted for, so it is inset slightly.
+    """
+    if rect is None:
+        return None
+    y, x, h, w = rect
+    max_h, max_w = bounds[:2]
+    y = int(round(y * factor)) + inset
+    x = int(round(x * factor)) + inset
+    h = int(round(h * factor)) - 2 * inset
+    w = int(round(w * factor)) - 2 * inset
+    y, x = max(0, min(y, max_h - 2)), max(0, min(x, max_w - 2))
+    h, w = max(2, min(h, max_h - y)), max(2, min(w, max_w - x))
+    return (y, x, h, w)

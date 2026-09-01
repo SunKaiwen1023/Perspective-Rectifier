@@ -480,6 +480,104 @@ def test_crop_modes_produce_expected_shapes():
     assert "Cropped to" in note
 
 
+# --------------------------------------------------------------------------
+# Full-resolution export
+# --------------------------------------------------------------------------
+
+
+def _large_session(width=2600):
+    """A session whose upload is much bigger than the analysis resolution.
+
+    This is the case that matters: the preview pipeline downscales to 1000 px
+    and then warps into a 900 px canvas, so without a separate export path a
+    2600-pixel photograph comes back as a small, soft image.
+    """
+    original = cv2.imread(os.path.join(EXAMPLES, "01_facade_clean.jpg"))
+    height = int(original.shape[0] * width / original.shape[1])
+    original = cv2.resize(original, (width, height), interpolation=cv2.INTER_CUBIC)
+    session = Session.from_rgb(cv2.cvtColor(original, cv2.COLOR_BGR2RGB))
+    session.recompute(threshold_deg=2.0)
+    return session, original
+
+
+def test_export_is_much_larger_than_the_preview():
+    session, original = _large_session()
+    assert session.original_bgr.shape == original.shape, "the upload must be retained"
+    assert session.scale < 0.5, "this test needs a genuinely downscaled analysis image"
+
+    preview, _ = session.rectified_rgb(MODE_FACADE_A, 1.0, crop.CROP_ORIGINAL)
+    exported, note = session.export_full_resolution(MODE_FACADE_A, 1.0, crop.CROP_ORIGINAL)
+
+    assert exported is not None
+    assert exported.shape[1] > 2 * preview.shape[1], (
+        f"export {exported.shape[1]} px wide vs preview {preview.shape[1]} px"
+    )
+    assert "Exported at" in note
+
+
+def test_export_frames_the_same_view_as_the_preview():
+    """The saved file must match what the user was looking at, not a re-search."""
+    session, _ = _large_session()
+    for crop_mode in (crop.CROP_ORIGINAL, crop.CROP_LARGEST, crop.CROP_OFF):
+        preview, _ = session.rectified_rgb(MODE_FACADE_A, 1.0, crop_mode)
+        exported, _ = session.export_full_resolution(MODE_FACADE_A, 1.0, crop_mode)
+        preview_aspect = preview.shape[1] / preview.shape[0]
+        export_aspect = exported.shape[1] / exported.shape[0]
+        assert abs(preview_aspect - export_aspect) < 0.02, (
+            f"{crop_mode}: preview {preview_aspect:.3f} vs export {export_aspect:.3f}"
+        )
+
+
+def test_export_keeps_the_original_aspect_ratio_when_asked():
+    session, original = _large_session()
+    exported, _ = session.export_full_resolution(MODE_FACADE_A, 1.0, crop.CROP_ORIGINAL)
+    wanted = original.shape[1] / original.shape[0]
+    got = exported.shape[1] / exported.shape[0]
+    assert abs(got - wanted) < 0.02, f"got {got:.3f}, wanted {wanted:.3f}"
+
+
+def test_export_is_sharper_than_upscaling_the_preview():
+    """The point of the whole exercise, measured rather than asserted.
+
+    Variance of the Laplacian is a standard focus measure: a soft image has
+    little high-frequency energy. Upscaling the preview to the export's size
+    adds pixels but no detail, so the real export should score far higher.
+    """
+    session, _ = _large_session()
+    preview_rgb, _ = session.rectified_rgb(MODE_FACADE_A, 1.0, crop.CROP_ORIGINAL)
+    exported, _ = session.export_full_resolution(MODE_FACADE_A, 1.0, crop.CROP_ORIGINAL)
+
+    preview_bgr = cv2.cvtColor(preview_rgb, cv2.COLOR_RGB2BGR)
+    upscaled = cv2.resize(
+        preview_bgr, (exported.shape[1], exported.shape[0]), interpolation=cv2.INTER_CUBIC
+    )
+
+    def focus(image):
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+    assert focus(exported) > 2.0 * focus(upscaled)
+
+
+def test_save_export_writes_both_formats(tmp_path):
+    session, _ = _large_session(width=1600)
+    for name in ("out.png", "out.jpg"):
+        path = str(tmp_path / name)
+        saved, note = session.save_export(path, MODE_FACADE_A, 1.0, crop.CROP_ORIGINAL)
+        assert saved == path and os.path.getsize(path) > 1000
+        # The written file must be readable back as an image, not just present.
+        assert cv2.imread(path) is not None
+        assert "Exported at" in note
+
+
+def test_export_reports_rather_than_crashes_when_no_vps():
+    blank = np.full((400, 600, 3), 210, dtype=np.uint8)
+    session = Session.from_rgb(blank)
+    session.recompute()
+    image, note = session.export_full_resolution(MODE_FACADE_A, 1.0)
+    assert image is None and note
+
+
 def test_crop_handles_a_hopeless_mask():
     """Scattered noise contains no usable rectangle; say so, do not crash."""
     rng = np.random.default_rng(0)

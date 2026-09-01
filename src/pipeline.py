@@ -47,6 +47,12 @@ class Session:
     image_bgr: np.ndarray
     lines: object
     features: np.ndarray
+
+    # The upload at its native resolution, plus the factor that produced
+    # `image_bgr` from it. Analysis runs on the small copy for speed; the
+    # export re-warps this one so the saved file is not a blown-up preview.
+    original_bgr: np.ndarray = None
+    scale: float = 1.0
     deleted: set = field(default_factory=set)
     restored: set = field(default_factory=set)
 
@@ -80,11 +86,17 @@ class Session:
         max_side: int = 1000,
     ) -> "Session":
         """Build a session from a Gradio-supplied RGB array."""
-        image_bgr = cv2.cvtColor(np.asarray(image_rgb), cv2.COLOR_RGB2BGR)
-        image_bgr, _ = resize_for_processing(image_bgr, max_side=max_side)
+        original_bgr = cv2.cvtColor(np.asarray(image_rgb), cv2.COLOR_RGB2BGR)
+        image_bgr, scale = resize_for_processing(original_bgr, max_side=max_side)
         lines = detect_lines(image_bgr, min_length_frac=min_length_frac, max_lines=max_lines)
         features = compute_features(image_bgr, lines)
-        session = cls(image_bgr=image_bgr, lines=lines, features=features)
+        session = cls(
+            image_bgr=image_bgr,
+            lines=lines,
+            features=features,
+            original_bgr=original_bgr,
+            scale=scale,
+        )
         session.assignment = np.full(len(lines), -1, dtype=int)
         return session
 
@@ -386,17 +398,17 @@ class Session:
         keep = (np.sign(signed) == sign) & (np.abs(signed) > horizon_margin * height)
         return grid[keep] if keep.sum() >= 8 else grid[grid[:, 1] > 0.4 * height]
 
-    def rectified_rgb(
-        self,
-        mode: str,
-        strength: float,
-        crop_mode: str = crop.CROP_ORIGINAL,
-        max_side: int = 900,
-    ):
-        """Warped, cropped image plus a short status note."""
+    def _homography_for_mode(self, mode: str):
+        """Resolve a mode to `(H, anchors, note)` in analysis-image coordinates.
+
+        Shared by the interactive preview and the full-resolution export so the
+        two cannot drift apart: whatever transform you are looking at is the
+        transform that gets saved. `H` is None when the mode cannot be served,
+        and `note` says why.
+        """
         vp_a, vp_b, note = self._vps_for_mode(mode)
         if vp_a is None:
-            return cv2.cvtColor(self.image_bgr, cv2.COLOR_BGR2RGB), note
+            return None, None, note
 
         if vp_b is None:
             # Keystone correction is meant to leave the framing alone, so the
@@ -430,10 +442,25 @@ class Session:
                 else self._anchor_points(vp_a, vp_b)
             )
         if H is None:
-            return (
-                cv2.cvtColor(self.image_bgr, cv2.COLOR_BGR2RGB),
-                "Those vanishing points are degenerate - prune a few lines and retry.",
-            )
+            note = "Those vanishing points are degenerate - prune a few lines and retry."
+        return H, anchors, note
+
+    def rectified_rgb(
+        self,
+        mode: str,
+        strength: float,
+        crop_mode: str = crop.CROP_ORIGINAL,
+        max_side: int = 900,
+    ):
+        """Warped, cropped preview image plus a short status note.
+
+        Deliberately rendered small: this runs on every click, so it trades
+        resolution for responsiveness. `export_full_resolution` produces the
+        version worth saving.
+        """
+        H, anchors, note = self._homography_for_mode(mode)
+        if H is None:
+            return cv2.cvtColor(self.image_bgr, cv2.COLOR_BGR2RGB), note
 
         warped, mask, _ = rectify.warp(
             self.image_bgr, H, strength=strength, max_side=max_side, anchors=anchors
@@ -441,6 +468,120 @@ class Session:
         warped, crop_note = crop.apply_crop(warped, mask, crop_mode, self.image_bgr.shape)
         note = " ".join(part for part in (note, crop_note) if part)
         return cv2.cvtColor(warped, cv2.COLOR_BGR2RGB), note
+
+    # ------------------------------------------------------------------
+    # Full-resolution export
+    # ------------------------------------------------------------------
+
+    def export_full_resolution(
+        self,
+        mode: str,
+        strength: float,
+        crop_mode: str = crop.CROP_ORIGINAL,
+        preview_side: int = 900,
+        max_side: int = 4000,
+    ):
+        """Re-warp the *original* upload at full resolution. Returns `(bgr, note)`.
+
+        The preview pipeline works on a copy downscaled to at most 1000 px and
+        then warps into a canvas of at most 900 px, so a 4000-pixel photograph
+        loses most of its detail twice over before it is ever displayed. That
+        is the right trade for something that recomputes on every click, and
+        the wrong one for a file you intend to keep.
+
+        The fix does not re-estimate anything. If `S` is the downscaling that
+        produced the analysis image and `H` is the homography found in that
+        frame, then a point of the original maps to the preview canvas by
+        `H . S`, and scaling the canvas back up by `k` gives
+
+            H_export = diag(k, k, 1) . H . S
+
+        which warps the untouched original directly into a canvas `k` times the
+        preview's size. Choosing `k = 1 / scale` restores the original pixel
+        density. The crop rectangle is scaled by the same factor rather than
+        searched again, so the exported file is framed exactly like the preview.
+        """
+        if self.original_bgr is None:
+            return None, "No original image retained for this session."
+
+        H, anchors, note = self._homography_for_mode(mode)
+        if H is None:
+            return None, note
+
+        # The preview warp, purely to obtain the fitted canvas and its mask.
+        _, preview_mask, H_preview = rectify.warp(
+            self.image_bgr, H, strength=strength, max_side=preview_side, anchors=anchors
+        )
+        preview_h, preview_w = preview_mask.shape[:2]
+
+        # Scale factor from the preview canvas to the export canvas, capped so
+        # a very large upload cannot ask for an unreasonable allocation.
+        k = 1.0 / max(self.scale, 1e-6)
+        k = min(k, max_side / max(preview_w, preview_h))
+        k = max(k, 1.0)
+
+        S = np.diag([self.scale, self.scale, 1.0])
+        K = np.diag([k, k, 1.0])
+        H_export = K @ H_preview @ S
+
+        out_w = int(round(preview_w * k))
+        out_h = int(round(preview_h * k))
+
+        try:
+            warped = cv2.warpPerspective(
+                self.original_bgr,
+                H_export,
+                (out_w, out_h),
+                # Cubic rather than linear: this is the copy someone keeps, and
+                # the extra cost is paid once instead of on every click.
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(24, 24, 24),
+            )
+        except (cv2.error, MemoryError) as exc:
+            return None, f"Could not render at full resolution ({exc})."
+
+        rect = crop.scale_rect(
+            crop.crop_rect(preview_mask, crop_mode, self.image_bgr.shape),
+            k,
+            warped.shape,
+        )
+        if rect is not None:
+            y, x, h, w = rect
+            warped = warped[y : y + h, x : x + w]
+
+        source = f"{self.original_bgr.shape[1]}x{self.original_bgr.shape[0]}"
+        note = (
+            f"{note} Exported at {warped.shape[1]}x{warped.shape[0]} px "
+            f"from the {source} px original."
+        ).strip()
+        return warped, note
+
+    def save_export(
+        self,
+        path: str,
+        mode: str,
+        strength: float,
+        crop_mode: str = crop.CROP_ORIGINAL,
+        jpeg_quality: int = 95,
+    ):
+        """Write the full-resolution result to `path`. Returns `(path, note)`.
+
+        The file extension chooses the encoder: `.png` for a lossless copy,
+        `.jpg` for a smaller one. Anything else is written as PNG.
+        """
+        image, note = self.export_full_resolution(mode, strength, crop_mode)
+        if image is None:
+            return None, note
+
+        lower = path.lower()
+        if lower.endswith((".jpg", ".jpeg")):
+            params = [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
+        else:
+            params = [cv2.IMWRITE_PNG_COMPRESSION, 6]
+        if not cv2.imwrite(path, image, params):
+            return None, "Could not write the exported file."
+        return path, note
 
     # ------------------------------------------------------------------
     # Diagnostics
