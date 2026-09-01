@@ -1,0 +1,15 @@
+# Runtime dependencies. Install with:  pip install -r requirements.txt
+#
+# Versions are given as floors rather than exact pins so the project installs
+# cleanly into an existing environment. The upper bound on OpenCV is deliberate:
+# the 5.x series has not shipped, and the line-segment detector this project
+# relies on has already been removed and restored once across minor versions
+# (see src/line_detection.py, which falls back gracefully if it is missing).
+
+numpy>=1.24
+opencv-python>=4.8,<5
+scikit-learn>=1.3
+gradio>=4.44
+
+# Tests only:  pytest -q
+pytest>=7.4

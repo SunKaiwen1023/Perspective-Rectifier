@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Gradio scratch
+.gradio/
+flagged/
+
+# OS noise
+.DS_Store
+Thumbs.db

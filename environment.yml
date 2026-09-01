@@ -1,0 +1,27 @@
+# Optional conda route. Create the environment with:
+#
+#     conda env create -f environment.yml
+#     conda activate perspective-rectifier
+#     python app.py
+#
+# The plain pip route in README.md works just as well; this file exists for
+# people who already manage their environments with conda.
+
+name: perspective-rectifier
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  - numpy>=1.24
+  - scikit-learn>=1.3
+  - pip:
+      # OpenCV and Gradio are installed via pip in both routes: the conda-forge
+      # OpenCV build does not always include the contrib modules this project
+      # falls back on, and Gradio moves fast enough that pip is the reliable
+      # source.
+      - opencv-python>=4.8,<5
+      - gradio>=4.44
+      - pytest>=7.4
