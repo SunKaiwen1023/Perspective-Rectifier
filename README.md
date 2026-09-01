@@ -350,6 +350,8 @@ perspective-rectifier/
 │   ├── make_examples.py      Renders the sample images from a pinhole camera
 │   ├── ground_truth.json     True vanishing points and focal lengths
 │   └── 0*.jpg                Four bundled scenes
+├── experiments/
+│   └── vegetation_sweep.py   Reproduces the foliage measurement in section 7
 ├── tests/
 │   └── test_pipeline.py      45 tests, checked against ground truth
 └── docs/                     Screenshots used in this README
@@ -363,8 +365,85 @@ nothing about widgets. That is why the whole algorithm can be tested headlessly.
 
 ## 7. Honest limitations
 
-- **It needs straight edges.** Brutalist concrete, glass curtain walls in flat
-  light, and anything organic will not give the detector enough to work with.
+### The scope is narrower than "photographs"
+
+**This works on scenes built out of straight structural edges, and only on
+those.** The entire method rests on one assumption: that the picture contains
+families of parallel lines belonging to a rigid, rectilinear object. Everything
+downstream — the grouping, the vanishing points, the focal length, the
+homography — is derived from that assumption and is meaningless without it.
+
+So the failure cases are not edge cases, they are whole categories: landscapes
+and natural scenes; curved or organic architecture; brutalist concrete and
+glass curtain walls photographed in flat light, where the edges exist but carry
+too little contrast to detect; close-ups of a wall with no visible corner; and
+any interior without clear door, window or ceiling lines. The tool does not
+crash on these — it reports that it found no usable family, or worse, finds a
+spurious one and rectifies confidently to it. **A confident wrong answer is the
+more dangerous outcome, and it is why the geometry is drawn on screen rather
+than hidden.**
+
+### Vegetation is the failure mode this project was built around, and it wins eventually
+
+Foliage produces long, straight, high-contrast edges pointing in arbitrary
+directions, and RANSAC has no way to know they are not architecture. Rather
+than assert that this is a problem, I measured it: `experiments/vegetation_sweep.py`
+renders the same facade with progressively more foliage and compares the
+recovered vertical vanishing point against the camera's known truth. Run it
+yourself with `python experiments/vegetation_sweep.py`.
+
+| Vegetation (share of detected lines) | Error, no pruning | After pruning the green lines | Structural lines left |
+|---|---|---|---|
+| 0% | 0.5° | 0.5° | 300 |
+| 6% | 0.6° | 0.1° | 281 |
+| 18% | 0.8° | 0.4° | 246 |
+| 28% | **4.6°** | 0.1° | 215 |
+| 32% | 1.9° | **1.9°** | 204 |
+| 43% | 2.7° | 0.9° | 171 |
+| 52% | 0.7° | 0.1° | 122 |
+| 60% | 2.4° | **2.3°** | 91 |
+| 68% | 0.6° | 0.9° | 66 |
+
+The interesting result is what the table *doesn't* show: **there is no clean
+threshold, and the degradation is not monotonic.** Accuracy swings between 0.5°
+and 4.6° with no relationship to how much vegetation is present — 28% foliage
+gives a worse estimate than 68% does. That erratic quality is the real problem,
+and it is worse for a user than a smooth decline would be, because you cannot
+look at a photograph, judge how leafy it is, and predict whether the automatic
+answer will be trustworthy. You have to look at the geometry — which is the
+argument for this project's whole premise.
+
+The second result is that **pruning usually rescues it, but not always.** In
+most rows it recovers accuracy to well under a degree. In two rows (32% and
+60%) it barely helps at all: by then the surviving vertical family is too small
+to outvote whatever else the estimator has latched onto, and deleting the green
+lines does not put good ones back.
+
+Read all of this as the *shape* of the failure, not as thresholds to quote for
+real photographs. These renders have far crisper window frames than real
+masonry, so structural lines survive much more occlusion here than they would
+in a real image, and the tool almost certainly fails earlier in practice than
+this table suggests. What the measurement does establish — early and
+unpredictable loss of *automatic* reliability, usually recoverable by hand until
+the structure genuinely thins out — is exactly the argument for masking
+vegetation before detection rather than pruning it afterwards.
+
+### One image at a time
+
+There is no batch mode. The tool processes a single upload, and the whole design
+assumes it: the session holds one image, one set of lines, one scorer trained on
+your clicks for *that* photo. Someone rectifying a set of thirty survey
+photographs of the same building would have to repeat every step thirty times,
+and the model would relearn the same lesson from scratch each time — which is
+particularly wasteful, because the corrections a user makes on one photo of a
+building are exactly the corrections the next photo needs.
+
+That is the most obvious thing this should grow into, and the architecture does
+not fight it: `Session` is already a self-contained object, so a batch would be
+a list of them sharing one trained scorer. See the next-steps list below.
+
+### Everything else
+
 - **The vertical family is fragile.** Vertical edges in a facade photo are
   usually shorter than horizontal ones (window sides versus window tops and
   brick courses), so the vertical family often has the least support — which is
@@ -400,11 +479,23 @@ nothing about widgets. That is why the whole algorithm can be tested headlessly.
   at the cost of a slower click loop; the export path only fixes output
   sharpness, not what the estimator had to work with.
 
-**What I would do next**, in order: use a segmentation model (Segment
-Anything, as suggested in feedback on my proposal) to mask vegetation and sky
-before detection, which would attack the foliage failure at its source rather
-than after the fact; add a lens-distortion parameter to the calibration; and
-let the user drag a vanishing point directly instead of only pruning lines.
+### What I would do next, in order
+
+1. **Mask vegetation and sky before detection** with a segmentation model
+   (Segment Anything, as suggested in the feedback on my proposal). This
+   attacks the foliage failure at its source instead of cleaning up afterwards,
+   and the table above is the argument for it: pruning works, but it should not
+   be the user's job to do what a segmentation model can do in one pass.
+2. **Batch processing.** Accept a folder or a multi-file upload, carry one
+   trained scorer across the whole set, and let corrections made on the first
+   photograph transfer to the rest. This is where the learned scorer would
+   finally pay for itself — thirty photographs of one building share the same
+   clutter, so the model would be learning something reusable instead of
+   relearning it thirty times.
+3. **Model lens distortion** as a parameter in the calibration, so wide-angle
+   phone photos stop breaking single edges into disagreeing segments.
+4. **Let the user drag a vanishing point directly**, rather than only editing
+   the evidence that produced it.
 
 ---
 
