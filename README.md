@@ -40,7 +40,7 @@ angles. On the bundled examples it lands within 0.1–1.3% of the true value.
 You need Python 3.9 or newer. From a fresh clone:
 
 ```bash
-git clone <this-repository-url>
+git clone https://github.com/SunKaiwen1023/Perspective-Rectifier.git
 cd perspective-rectifier
 
 python -m venv .venv
